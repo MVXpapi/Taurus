@@ -46,6 +46,10 @@
 NSNotificationName const SGRPlayerBlurOpacityDidChangeNotification = @"spotifyglass.redesign.player.blurOpacityDidChange";
 static NSString *const kLyricsBlurByTrackKey = @"spotifyglass.redesign.player.lyricsBlurByTrack";
 
+static BOOL lyricsBlurEnabledForTrack(NSString *track);
+static NSString *currentLyricsBlurTrack(void);
+static void refreshLyricsBlurForTrack(NSString *track);
+
 // Where the clip starts dissolving into its foot, as a share of its height.
 static const CGFloat kFootFrom = 0.9;
 // The share of the poster's height, at its bottom, drawn on down as the foot (one pixel row at least).
@@ -131,8 +135,7 @@ static CGFloat brightEnd(NSData *luminances) {
 - (void)setBlurred:(BOOL)blurred animated:(BOOL)animated;
 @end
 
-static BOOL lyricsBlurEnabledForTrack(NSString *track);
-static NSString *currentLyricsBlurTrack(void);
+static void refreshLyricsBlurForTrack(NSString *track);
 
 @implementation SGRPlayerMotionView {
     AVQueuePlayer *_player;
@@ -239,10 +242,8 @@ static UIViewPropertyAnimator *setBlurIntensity(UIVisualEffectView *view, UIView
 }
 
 - (void)playerStateDidChange:(SPTPlayerState *)state {
-    NSString *track = SGURIString(state.track.URI) ?: currentLyricsBlurTrack();
-    BOOL blurred = SGRPlayerLyricsOpen() && lyricsBlurEnabledForTrack(track);
-    [self setBlurred:blurred animated:self.window != nil];
-    [SGRPlayerField() setLyricsBlurred:blurred animated:self.window != nil];
+    NSString *track = currentLyricsBlurTrack() ?: SGURIString(state.track.URI);
+    if (track.length) refreshLyricsBlurForTrack(track);
     [self updateMotion];
 }
 
@@ -268,6 +269,7 @@ static UIViewPropertyAnimator *setBlurIntensity(UIVisualEffectView *view, UIView
     if (_aspect > kCanvasAspect) height = MAX(height, screen);
     CGFloat seam = round(height * kFootFrom), blurFrom = MIN(seam, round(screen * kBlurByControls));
     _picture.frame = bounds;
+    if (_lyricsBlur) [self bringSubviewToFront:_lyricsBlur];
     _seamBlur.frame = bounds;
     _seamBlur.maskView.frame = bounds;
     _lyricsBlur.frame = bounds;
@@ -360,14 +362,13 @@ static UIViewPropertyAnimator *setBlurIntensity(UIVisualEffectView *view, UIView
     SGRAnimate(SGRMotionFade, ^{
         self->_picture.alpha = 0;
         self->_seamUp = NO;
-        self->_lyricsUp = NO;
         self->_seamBlurAnimator = setBlurIntensity(self->_seamBlur, self->_seamBlurAnimator, 0);
-        self->_lyricsBlurAnimator = setBlurIntensity(self->_lyricsBlur, self->_lyricsBlurAnimator, 0);
     }, ^(BOOL finished) { done(); });
 }
 
 // The lyrics' blur, and their share of the dim, which a layer's own animation carries over the same fade.
 - (void)setBlurred:(BOOL)blurred animated:(BOOL)animated {
+    if (_lyricsUp == blurred) return;
     _lyricsUp = blurred;
     void (^apply)(void) = ^{
         self->_lyricsBlurAnimator = setBlurIntensity(self->_lyricsBlur, self->_lyricsBlurAnimator,
@@ -632,7 +633,16 @@ static BOOL lyricsBlurEnabledForTrack(NSString *track) {
 }
 
 static NSString *currentLyricsBlurTrack(void) {
-    return SGURIString(SGPlayerState().track.URI) ?: sg_track;
+    return sg_track.length ? sg_track : (SGURIString(SGPlayerState().track.URI) ?: nil);
+}
+
+static void refreshLyricsBlurForTrack(NSString *track) {
+    if (!track.length) return;
+    BOOL blurred = SGRPlayerLyricsOpen() && lyricsBlurEnabledForTrack(track);
+    [sg_motion setBlurred:blurred animated:NO];
+    SGRArtworkField *field = SGRPlayerField();
+    [field setLyricsBlurred:blurred animated:NO];
+    SGRPlayerVisualiserUpdate();
 }
 
 BOOL SGRPlayerMotionLyricsBlurEnabled(void) {
@@ -708,10 +718,12 @@ static void show(NSString *track, NSURL *file) {
 }
 
 void SGRPlayerMotionLyricsChanged(void) {
-    BOOL blurred = SGRPlayerLyricsOpen() && lyricsBlurEnabledForTrack(currentLyricsBlurTrack());
-    [sg_motion setBlurred:blurred animated:sg_motion.window != nil];
+    NSString *track = currentLyricsBlurTrack();
+    BOOL blurred = SGRPlayerLyricsOpen() && lyricsBlurEnabledForTrack(track);
+    [sg_motion setBlurred:blurred animated:NO];
     SGRArtworkField *field = SGRPlayerField();
-    [field setLyricsBlurred:blurred animated:field.window != nil];
+    [field setLyricsBlurred:blurred animated:NO];
+    SGRPlayerVisualiserUpdate();
 }
 
 static void videoSurface(id unit, BOOL attached) {
@@ -733,7 +745,10 @@ static BOOL beginTrack(NSString *track) {
     sg_track = track;
     sg_begun++;
     BOOL blurLyrics = SGRPlayerLyricsOpen() && lyricsBlurEnabledForTrack(track);
-    [sg_motion setBlurred:blurLyrics animated:sg_motion.window != nil];
+    [sg_motion setBlurred:blurLyrics animated:NO];
+    [SGRPlayerField() setLyricsBlurred:blurLyrics animated:NO];
+    SGRPlayerVisualiserUpdate();
+    refreshLyricsBlurForTrack(track);
     // Read on every track, since the ⋯ menu switches it.
     BOOL wanted = SGRPlayerBackground() == SGRPlayerBackgroundAnimated && !videoShowing() && motionAllowed();
     if (wanted && [track isEqualToString:sg_shown]) return YES;

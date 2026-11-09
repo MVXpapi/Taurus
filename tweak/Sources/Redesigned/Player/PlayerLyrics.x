@@ -33,6 +33,7 @@
 #import "Shared/Sing/SGSingController.h"
 #import "Shared/Lyrics/Lyrics.h"
 #import "Shared/LocalFiles/LocalFiles.h"
+#import "Shared/Player/PlayerState.h"
 #import "Player.h"
 
 static const CGFloat kThumbSide = 72;          // the cover once the lyrics are up
@@ -55,7 +56,7 @@ static const CGFloat kLivingHeight = 200;
 // The lines on their own: the controls under them fade after this long without a touch.
 static const NSTimeInterval kRest = 4;
 
-static char kOverlayKey, kPlateKey, kTitleKey, kStackKey;
+static char kOverlayKey, kPlateKey, kTitleKey, kArtistKey, kStackKey;
 static BOOL sg_open;
 static BOOL sg_moving;                      // the transition is in flight, so no layout pass may re-place it
 static __weak UIView *sg_host;              // SPTNowPlayingView
@@ -698,10 +699,45 @@ void SGRPlayerToggleLyrics(void) {
     setOpen(!sg_open, YES);
 }
 
+static void refreshPlayerInfoLabels(void) {
+    UIView *host = sg_host;
+    if (!host) host = sg_info.viewIfLoaded;
+    if (!host) return;
+    SPTPlayerTrack *track = SGPlayerState().track;
+    if (!track) return;
+    NSDictionary *metadata = [track.metadata isKindOfClass:NSDictionary.class] ? track.metadata : nil;
+    NSString *albumURI = [metadata[@"album_uri"] isKindOfClass:NSString.class] ? metadata[@"album_uri"] : nil;
+    NSDictionary *edit = SGTrackEditFor(SGURIString(track.URI), albumURI);
+    NSString *titleText = [edit[@"title"] isKindOfClass:NSString.class] && ((NSString *)edit[@"title"]).length ? edit[@"title"] : track.trackTitle;
+    NSString *artistText = [edit[@"artist"] isKindOfClass:NSString.class] && ((NSString *)edit[@"artist"]).length ? edit[@"artist"] : track.artistName;
+    UILabel *title = (UILabel *)SGRFindByIdentifier(host, @"now-playing-title-label", &kTitleKey);
+    UILabel *artist = (UILabel *)SGRFindByIdentifier(host, @"now-playing-subtitle-label", &kArtistKey);
+    if ([title isKindOfClass:UILabel.class] && titleText.length && ![title.text isEqualToString:titleText]) title.text = titleText;
+    if ([artist isKindOfClass:UILabel.class] && artistText.length && ![artist.text isEqualToString:artistText]) artist.text = artistText;
+}
+
+%hook UILabel
+- (void)setText:(NSString *)text {
+    NSString *identifier = self.accessibilityIdentifier;
+    if ([identifier isEqualToString:@"now-playing-title-label"] || [identifier isEqualToString:@"now-playing-subtitle-label"] ) {
+        SPTPlayerTrack *track = SGPlayerState().track;
+        NSDictionary *metadata = [track.metadata isKindOfClass:NSDictionary.class] ? track.metadata : nil;
+        NSString *albumURI = [metadata[@"album_uri"] isKindOfClass:NSString.class] ? metadata[@"album_uri"] : nil;
+        NSDictionary *edit = track ? SGTrackEditFor(SGURIString(track.URI), albumURI) : nil;
+        NSString *custom = [identifier isEqualToString:@"now-playing-title-label"] ? edit[@"title"] : edit[@"artist"];
+        if ([custom isKindOfClass:NSString.class] && custom.length) text = custom;
+        else if ([identifier isEqualToString:@"now-playing-title-label"] && track.trackTitle.length) text = track.trackTitle;
+        else if ([identifier isEqualToString:@"now-playing-subtitle-label"] && track.artistName.length) text = track.artistName;
+    }
+    %orig(text);
+}
+%end
+
 // A layout pass, a new track or a turn of the phone: the state is put back where it belongs without
 // animating, since the frames it is measured from have just changed.
 static void replace(void) {
     UIView *host = sg_host;
+    refreshPlayerInfoLabels();
     if (!host || sg_moving) return;   // a pass in the middle of the transition would cut it short
     SGRLyricsLayout l = layoutIn(host);
     if (sg_open && !l.ok) return;
@@ -809,7 +845,13 @@ static void replace(void) {
 // A rename is looked up like a new track, so lines that stay up with none for the new names go once the
 // look for them ends, as a new track's do after the grace.
 - (void)editsChanged:(NSNotification *)note {
-    if (![note.object isKindOfClass:NSString.class] || ![note.object isEqualToString:_track]) return;
+    SPTPlayerState *state = SGPlayerState();
+    NSString *track = SGURIString(state.track.URI);
+    id album = state.track.metadata[@"album_uri"];
+    NSString *albumURI = [album isKindOfClass:NSString.class] ? album : nil;
+    NSString *editedTrack = [note.object isKindOfClass:NSString.class] ? note.object : nil;
+    NSString *editedAlbum = [note.userInfo[@"albumURI"] isKindOfClass:NSString.class] ? note.userInfo[@"albumURI"] : nil;
+    if (![editedTrack isEqualToString:track] && ![editedAlbum isEqualToString:albumURI]) return;
     SGRPlayerLyricsChanged();
 }
 
@@ -826,11 +868,15 @@ static void replace(void) {
 // The lines go once the grace is over and nothing is looking for the track's own any more.
 - (void)closeIfNone {
     if (!_graceOver || !sg_open || SGRPlayerLyricsAvailable() || SGKaraokeLooking(SGKaraokePlayingTrack())) return;
+    NSString *playingTrack = SGURIString(SGPlayerState().track.URI);
+    if (!playingTrack || ![playingTrack isEqualToString:_track]) return;
     SGLog(@"redesign player: no lyrics for the track that came on, the cover is back");
     setOpen(NO, YES);
 }
 
 - (void)playerStateDidChange:(SPTPlayerState *)state {
+    refreshPlayerInfoLabels();
+    dispatch_async(dispatch_get_main_queue(), ^{ refreshPlayerInfoLabels(); });
     // A pause brings the controls back and keeps them; playing again starts the clock.
     if (state.isPaused) {
         setAlone(NO, YES);
@@ -867,6 +913,10 @@ static SGRPlayerLyricsWatcher *sg_watcher;
     %init;
     sg_watcher = [SGRPlayerLyricsWatcher new];
     SGAddPlayerStateObserver(sg_watcher);
+    [NSNotificationCenter.defaultCenter addObserverForName:SGLocalFileEditsDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        refreshPlayerInfoLabels();
+        dispatch_async(dispatch_get_main_queue(), ^{ refreshPlayerInfoLabels(); });
+    }];
     // In the background the controls stay up; back in front the clock starts again.
     [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
         setAlone(NO, NO);
