@@ -1,6 +1,7 @@
 #import "Core/SGCore.h"
 #import "Redesigned/Kit/SGRKit.h"
 #import "Library.h"
+#import "Redesigned/Navbar/Navbar.h"
 
 NSString *const SGRLibraryListIdentifier = @"YourLibraryContent.collectionView";
 
@@ -14,6 +15,13 @@ static void vanish(UIView *view) {
     if (view.alpha != 0) view.alpha = 0;
     if (view.userInteractionEnabled) view.userInteractionEnabled = NO;
     view.accessibilityElementsHidden = YES;
+}
+
+BOOL SGRLibraryHideChipsOn(void) {
+    static BOOL on;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ on = SGHidden(SGRKeyLibraryHideChips); });
+    return on;
 }
 
 static UIView *childNamed(UIView *host, NSString *marker) {
@@ -134,9 +142,11 @@ static NSArray<UIView *> *placeRoot(UIView *header) {
     SGForEachView(header, ^(UIView *view) {
         if (!face && isFace(view) && view.bounds.size.width > 1) face = view;
     });
-    if (face) [trailing addObject:face];
+    SGRNavbarSetProfilePhotoVisible(face);
+    if (face && SGFlag(SGRKeyNavbarProfilePhoto, YES)) [trailing addObject:face];
     CGFloat trailingEdge = trailing.count ? placeTrailing(header, trailing) : header.bounds.size.width - kRowInset;
     CGRect rowFrame = SGFrameIn(trailing.firstObject ?: spotifyTitle, header);
+    // The avatar is only ours to move once it is found; Spotify's own title holds its place until then.
     CGFloat leading = face ? SGRSideMargin : MAX(SGRSideMargin, CGRectGetMinX(SGFrameIn(spotifyTitle, header)));
     layoutTitle(header, spotifyTitle, leading, trailingEdge, CGRectGetMidY(rowFrame));
     for (UIView *control in trailing) watchRow(control.superview, header, placeRoot);
@@ -168,6 +178,8 @@ static void layoutRoot(UIView *page) {
     if (!header) return;
     [header layoutIfNeeded];
     SGRLibraryClearScrim(header);
+    UIView *chips = childNamed(header, @"YourLibraryHeaderContentFiltersView");
+    if (SGRLibraryHideChipsOn()) vanish(chips);
 
     NSArray<UIView *> *trailing = placeRoot(header);
     if (!trailing.count) return;
@@ -178,7 +190,7 @@ static void layoutRoot(UIView *page) {
         logged = YES;
         SGLog(@"redesign library: header %@, %lu controls at the trailing edge, avatar %@, chips %@",
               NSStringFromCGRect(header.frame), (unsigned long)trailing.count, face ? @"found" : @"not found",
-              childNamed(header, @"YourLibraryHeaderContentFiltersView") ? @"Spotify's" : @"not found");
+              chips ? (SGRLibraryHideChipsOn() ? @"hidden" : @"Spotify's") : @"not found");
     }
 }
 
@@ -187,6 +199,8 @@ static void layoutFolder(UIView *page) {
     if (!header) return;
     [header layoutIfNeeded];
     SGRLibraryClearScrim(header);
+    UIView *chips = childNamed(header, @"YourLibraryHeaderContentFiltersView");
+    if (SGRLibraryHideChipsOn()) vanish(chips);
 
     NSArray<UIView *> *placed = placeFolder(header);
     if (!placed.count) return;
@@ -198,7 +212,7 @@ static void layoutFolder(UIView *page) {
         logged = YES;
         SGLog(@"redesign library: folder header %@, back %@, %lu controls at the trailing edge, chips %@",
               NSStringFromCGRect(header.frame), back ? @"found" : @"not found", (unsigned long)trailing,
-              childNamed(header, @"YourLibraryHeaderContentFiltersView") ? @"Spotify's" : @"not found");
+              chips ? (SGRLibraryHideChipsOn() ? @"hidden" : @"Spotify's") : @"not found");
     }
 }
 
